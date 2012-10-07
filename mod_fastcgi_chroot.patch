@@ -1,0 +1,182 @@
+diff -aur --exclude '*.lo' --exclude '*.la' --exclude '*~' --exclude '*.o' --exclude '*.a' --exclude '*.so' --exclude '*.slo' --exclude '*.list' --exclude .libs --exclude '*.loT' mod_fastcgi-2.4.6.orig/fcgi_config.c mod_fastcgi-2.4.6/fcgi_config.c
+--- mod_fastcgi-2.4.6.orig/fcgi_config.c	2007-10-29 01:22:00.000000000 +0100
++++ mod_fastcgi-2.4.6/fcgi_config.c	2012-01-31 11:27:29.000000000 +0100
+@@ -921,6 +921,11 @@
+         else if (strcasecmp(option, "-nph") == 0) {
+             s->nph = 1;
+         }
++        else if (strcasecmp(option, "-chroot") == 0) {
++            s->chroot_path = ap_getword_conf(tp, &arg);
++            if (*s->chroot_path == '\0')
++                return invalid_value(tp, name, fs_path, option, "\"\"");
++        }
+         else if (strcasecmp(option, "-pass-header") == 0) {
+             if ((err = get_pass_header(p, &arg, &s->pass_headers)))
+                 return invalid_value(tp, name, fs_path, option, err);
+diff -aur --exclude '*.lo' --exclude '*.la' --exclude '*~' --exclude '*.o' --exclude '*.a' --exclude '*.so' --exclude '*.slo' --exclude '*.list' --exclude .libs --exclude '*.loT' mod_fastcgi-2.4.6.orig/fcgi.h mod_fastcgi-2.4.6/fcgi.h
+--- mod_fastcgi-2.4.6.orig/fcgi.h	2007-09-23 18:33:29.000000000 +0200
++++ mod_fastcgi-2.4.6/fcgi.h	2012-01-31 11:27:29.000000000 +0100
+@@ -261,6 +261,8 @@
+                                      * waiting to connect to the fastcgi app
+                                      * since the last dynamicUpdateInterval. */
+     int nph;
++    const char *chroot_path;        /* external server's chroot path, to replace one in
++                                     * SERVER_FILENAME env */
+     struct _FastCgiServerInfo *next;
+ } fcgi_server;
+ 
+diff -aur --exclude '*.lo' --exclude '*.la' --exclude '*~' --exclude '*.o' --exclude '*.a' --exclude '*.so' --exclude '*.slo' --exclude '*.list' --exclude .libs --exclude '*.loT' mod_fastcgi-2.4.6.orig/fcgi_protocol.c mod_fastcgi-2.4.6/fcgi_protocol.c
+--- mod_fastcgi-2.4.6.orig/fcgi_protocol.c	2003-02-03 23:59:01.000000000 +0100
++++ mod_fastcgi-2.4.6/fcgi_protocol.c	2012-01-31 12:10:32.000000000 +0100
+@@ -190,32 +190,122 @@
+  * Build and queue the environment name-value pairs.  Returns TRUE if the
+  * complete ENV was buffered, FALSE otherwise.  Note: envp is updated to
+  * reflect the current position in the ENV.
++ *
++ * Patched by Rafal Fruhling < rafamiga at gmail dot com > 2012
++ * revision 3, Jan 31st
++ * Visit http://orfika.net/src/mod_fastcgi-chroot-patch/ for more info.
+  */
+ int fcgi_protocol_queue_env(request_rec *r, fcgi_request *fr, env_status *env)
+ {
+-    int charCount;
++    unsigned int charCount;
++    char **envp_copy;
++    pool *const rp = r->pool;
++    /* be nice, allocate memory instead of buf[1024]... */
++    char *bufChrootScriptFilename = apr_palloc(rp, 1024);
++    char *eq;
++    unsigned int n;
++    unsigned int l;
++    unsigned int fixTheValue=FALSE;
++    unsigned int dontFixValue=FALSE;
++    unsigned int forcedValue=FALSE;
++    
++    FCGIDBG1("I am fcgi_protocol_queue_env!");
++    if (fr->fs->chroot_path != NULL) {
++        FCGIDBG2("I feel like I'm chrooted to '%s'",fr->fs->chroot_path);
++    }
+ 
++    if (!bufChrootScriptFilename) {
++      FCGIDBG1("fcgi_protocol_queue_env: apr_palloc(rp, 1024) failed");
++      return(FALSE);
++    }
++      
+     if (env->envp == NULL) {
+         ap_add_common_vars(r);
+         add_pass_header_vars(fr);
+ 
+-        if (fr->role == FCGI_RESPONDER)
++        if (fr->role == FCGI_RESPONDER) {
+ 	        ap_add_cgi_vars(r);
++	        }
+         else
+             add_auth_cgi_vars(r, fr->auth_compat);
+ 
++        /* an array */
+         env->envp = ap_create_environment(r->pool, r->subprocess_env);
++        envp_copy = env->envp;
+         env->pass = PREP;
++
++        /* if we have -chroot set, weeed out SCRIPT_URL value first */
++        if (fr->fs->chroot_path != NULL) {
++            while (*envp_copy) {
++                n = strncmp(*envp_copy,"SCRIPT_URL=",11);
++                if (n == 0) {
++                    FCGIDBG1("Found SCRIPT_URL env, fetch the value");
++                    if (forcedValue == FALSE) {
++                        eq = *envp_copy + 11;
++
++                        l = apr_snprintf(bufChrootScriptFilename,1024,"%s%s",fr->fs->chroot_path,eq);
++                        ASSERT(l >= 0);
++                        if (l == 0) return FALSE;
++
++                        FCGIDBG3("The new SCRIPT_FILENAME is '%s', len %d",
++                            bufChrootScriptFilename,(int) strlen(bufChrootScriptFilename));
++                    } else {
++                    FCGIDBG1("Won't use SCRIPT_URL because FORCE_SCRIPT_FILENAME was used previously");
++                    }
++                }
++
++                /* check if we have FORCE_SCRIPT_FILENAME environment
++                * variable; if found, use it's value over any SCRIPT_URL's
++                * */
++                
++                n = strncmp(*envp_copy,"FORCE_SCRIPT_FILENAME=",22);
++                if (n == 0) {
++                    FCGIDBG1("Found FORCE_SCRIPT_FILENAME env, fetch the value, override SCRIPT_URL");
++                    eq = *envp_copy + 22;
++                    
++                    l = apr_snprintf(bufChrootScriptFilename,1024,"%s",eq);
++                    ASSERT(l >= 0);
++                    if (l == 0) return FALSE;
++
++                    FCGIDBG3("Forced SCRIPT_FILENAME to '%s', len %d",
++                        bufChrootScriptFilename,(int) strlen(bufChrootScriptFilename));
++                    forcedValue = TRUE;
++                }
++
++                /* check if it's DirectoryIndex request, if so, cancel
++                 * SCRIPT FILENAME substitution */
++                
++                n = strcmp(*envp_copy,"SCRIPT_NAME=/");
++                if (n == 0) {
++                    FCGIDBG1("Cancel patch, we've found SCRIPT_NAME=/");
++                    dontFixValue = TRUE;
++                    break; /* do not search for anything else... */
++                }
++                ++envp_copy;
++            }
++        }
+     }
+ 
+     while (*env->envp) {
+         switch (env->pass) 
+         {
+         case PREP:
++            
+             env->equalPtr = strchr(*env->envp, '=');
+             ASSERT(env->equalPtr != NULL);
+             env->nameLen = env->equalPtr - *env->envp;
+-            env->valueLen = strlen(++env->equalPtr);
++
++            /* check if it's SCRIPT_FILENAME and change valueLen (passed in
++             * header) accordingly unless it's index request... */
++            if (dontFixValue != TRUE && fr->fs->chroot_path != NULL && strncmp(*env->envp,"SCRIPT_FILENAME=",16) == 0) {
++                FCGIDBG1("Found SCRIPT_FILENAME env, let's patch it");
++                env->valueLen = strlen(bufChrootScriptFilename);
++                fixTheValue = TRUE;
++            }
++            else {
++                    env->valueLen = strlen(++env->equalPtr);
++            }
++
+             build_env_header(env->nameLen, env->valueLen, env->headerBuff, &env->headerLen);
+             env->totalLen = env->headerLen + env->nameLen + env->valueLen;
+             env->pass = HEADER;
+@@ -241,7 +331,16 @@
+             /* drop through */
+ 
+         case VALUE:
+-            charCount = fcgi_buf_add_block(fr->serverOutputBuffer, env->equalPtr, env->valueLen);
++              if (fixTheValue == TRUE && dontFixValue != TRUE && fr->fs->chroot_path != NULL) {
++                  FCGIDBG2("Replace SCRIPT_FILENAME with chroot path '%s",bufChrootScriptFilename);
++                  FCGIDBG2("Original SCRIPT_FILENAME is '%s'",env->equalPtr);
++                  env->valueLen = strlen(bufChrootScriptFilename);
++                  charCount = fcgi_buf_add_block(fr->serverOutputBuffer, bufChrootScriptFilename, strlen(bufChrootScriptFilename));
++                  fixTheValue = FALSE;
++            } else {
++                  charCount = fcgi_buf_add_block(fr->serverOutputBuffer, env->equalPtr, env->valueLen);
++            }
++
+             if (charCount != env->valueLen) {
+                 env->equalPtr += charCount;
+                 env->valueLen -= charCount;
+@@ -255,6 +354,7 @@
+     if (BufferFree(fr->serverOutputBuffer) < sizeof(FCGI_Header)) {
+         return(FALSE);
+     }
++
+     queue_header(fr, FCGI_PARAMS, 0);
+     return(TRUE);
+ }
