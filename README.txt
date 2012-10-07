@@ -120,8 +120,8 @@
 # --------
 
 # 2012-10-07, revision 4
-      - includes patch to use PATH_INFO and PATH_TRANSLATED instead of
-        SCRIPT_URL and SCRIPT_FILENAME variable.
+#     - includes patch to use PATH_INFO and PATH_TRANSLATED instead of
+#       SCRIPT_URL and SCRIPT_FILENAME variable.
 # 2012-01-31, revision 3
 #     - allow override with FORCE_SCRIPT_FILENAME
 # 2012-01-23, revision 2 (first public release)
